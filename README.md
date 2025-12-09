@@ -1,3 +1,3 @@
 RAW
 
-https://raw.githubusercontent.com/derren000/AIM1/refs/heads/main/AIMV2
+loadstring(game:HttpGet("https://raw.githubusercontent.com/derren000/AIM1/refs/heads/main/AIMV3"))()
