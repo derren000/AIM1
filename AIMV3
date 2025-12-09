@@ -150,29 +150,37 @@ end)
 
 local function CancelLock()
 	Environment.Locked = nil
-	if Animation then Animation:Cancel() end
+	if Animation then
+		Animation:Cancel()
+		Animation = nil
+	end
 	Environment.FOVCircle.Color = Environment.FOVSettings.Color
 end
 
 local function GetClosestPlayer()
+	-- cache mouse position once per call (faster)
+	local mousePos = Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+
 	if not Environment.Locked then
 		RequiredDistance = (Environment.FOVSettings.Enabled and Environment.FOVSettings.Amount or 2000)
 
 		-- =====================================================
-		-- 1. CHECK NORMAL PLAYERS
+		-- 1. CHECK PLAYERS FIRST (fast path)
 		-- =====================================================
 		for _, v in next, Players:GetPlayers() do
 			if v ~= LocalPlayer then
-				if v.Character and v.Character:FindFirstChild(Environment.Settings.LockPart) and v.Character:FindFirstChildOfClass("Humanoid") then
-
+				local char = v.Character
+				if char and char:FindFirstChild(Environment.Settings.LockPart) and char:FindFirstChildOfClass("Humanoid") then
 					if Environment.Settings.TeamCheck and v.Team == LocalPlayer.Team then continue end
-					if Environment.Settings.AliveCheck and v.Character:FindFirstChildOfClass("Humanoid").Health <= 0 then continue end
-					if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({v.Character[Environment.Settings.LockPart].Position}, v.Character:GetDescendants())) > 0 then continue end
+					if Environment.Settings.AliveCheck and char:FindFirstChildOfClass("Humanoid").Health <= 0 then continue end
+					if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({char[Environment.Settings.LockPart].Position}, char:GetDescendants())) > 0 then continue end
 
-					local Vector, OnScreen = Camera:WorldToViewportPoint(v.Character[Environment.Settings.LockPart].Position)
-					local Distance = (Vector2(UserInputService:GetMouseLocation().X,
-						UserInputService:GetMouseLocation().Y)
-						- Vector2(Vector.X, Vector.Y)).Magnitude
+					local ok, vec = pcall(function()
+						return Camera:WorldToViewportPoint(char[Environment.Settings.LockPart].Position)
+					end)
+					if not ok then continue end
+					local OnScreen = vec.Z > 0
+					local Distance = (mousePos - Vector2(vec.X, vec.Y)).Magnitude
 
 					if Distance < RequiredDistance and OnScreen then
 						RequiredDistance = Distance
@@ -183,27 +191,35 @@ local function GetClosestPlayer()
 		end
 
 		-- =====================================================
-		-- 2. CHECK NPCs (ALL HUMANOIDS IN WORKSPACE)
+		-- 2. CHECK NPCs ONLY IF NO PLAYER FOUND OR closer possible
+		--    (iterate workspace descendants once)
 		-- =====================================================
-		for _, obj in ipairs(workspace:GetDescendants()) do
-			if obj:IsA("Humanoid") then
-				local model = obj.Parent
+		-- Only proceed if there's still room to find something closer than current RequiredDistance
+		if RequiredDistance > 0 then
+			local desc = workspace:GetDescendants()
+			for i = 1, #desc do
+				local obj = desc[i]
+				if obj and obj:IsA("Humanoid") then
+					local model = obj.Parent
+					-- Skip player's own character or players' characters (we already checked players)
+					if model ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(model) then
+						local part = model:FindFirstChild(Environment.Settings.LockPart)
+						if part then
+							if Environment.Settings.AliveCheck and obj.Health <= 0 then continue end
+							if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({part.Position}, model:GetDescendants())) > 0 then continue end
 
-				-- Skip player's own character
-				if model ~= LocalPlayer.Character then
-					local part = model:FindFirstChild(Environment.Settings.LockPart)
-					if part then
-						if Environment.Settings.AliveCheck and obj.Health <= 0 then continue end
-						if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({part.Position}, model:GetDescendants())) > 0 then continue end
+							local ok, vec = pcall(function()
+								return Camera:WorldToViewportPoint(part.Position)
+							end)
+							if not ok then continue end
+							local OnScreen = vec.Z > 0
+							local Distance = (mousePos - Vector2(vec.X, vec.Y)).Magnitude
 
-						local Vector, OnScreen = Camera:WorldToViewportPoint(part.Position)
-						local Distance = (Vector2(UserInputService:GetMouseLocation().X,
-							UserInputService:GetMouseLocation().Y)
-							- Vector2(Vector.X, Vector.Y)).Magnitude
-
-						if Distance < RequiredDistance and OnScreen then
-							RequiredDistance = Distance
-							Environment.Locked = { Character = model } -- Fake player wrapper
+							if Distance < RequiredDistance and OnScreen then
+								RequiredDistance = Distance
+								-- create a light wrapper so rest of code can treat it similar to player
+								Environment.Locked = { Character = model, _isNPC = true }
+							end
 						end
 					end
 				end
@@ -211,16 +227,27 @@ local function GetClosestPlayer()
 		end
 
 	else
-		-- Check if locked target leaves the FOV
-		local lockChar = Environment.Locked.Character
+		-- When already locked:
+		-- If we are in toggle mode and Running -> keep lock regardless of mouse movement (user requested)
+		-- If we are NOT in toggle mode -> keep previous behavior: unlock when target leaves FOV radius
+		local lockChar = Environment.Locked and Environment.Locked.Character
 		if lockChar and lockChar:FindFirstChild(Environment.Settings.LockPart) then
-			local Vector = Camera:WorldToViewportPoint(lockChar[Environment.Settings.LockPart].Position)
-			local Distance = (Vector2(UserInputService:GetMouseLocation().X,
-				UserInputService:GetMouseLocation().Y)
-				- Vector2(Vector.X, Vector.Y)).Magnitude
-
-			if Distance > RequiredDistance then
+			-- compute current distance from mouse to target
+			local ok, vec = pcall(function()
+				return Camera:WorldToViewportPoint(lockChar[Environment.Settings.LockPart].Position)
+			end)
+			if not ok then
 				CancelLock()
+				return
+			end
+			local OnScreen = vec.Z > 0
+			local Distance = (Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y) - Vector2(vec.X, vec.Y)).Magnitude
+
+			-- only cancel when: not toggle mode AND Distance > RequiredDistance OR the target is offscreen
+			if (not Environment.Settings.Toggle and Distance > RequiredDistance) or (not OnScreen) then
+				CancelLock()
+			else
+				-- keep lock (important: don't recalc RequiredDistance here; keep it as previous value so we don't flip)
 			end
 		else
 			CancelLock()
@@ -257,10 +284,19 @@ local function Load()
 			GetClosestPlayer()
 
 			if Environment.Locked then
+				-- ensure the locked Character still exists and has lock part before attempting to aim
+				local ok, targetPos = pcall(function()
+					return Environment.Locked.Character[Environment.Settings.LockPart].Position
+				end)
+				if not ok then
+					CancelLock()
+					return
+				end
+
 				if Environment.Settings.ThirdPerson then
 					Environment.Settings.ThirdPersonSensitivity = mathclamp(Environment.Settings.ThirdPersonSensitivity, 0.1, 5)
 
-					local Vector = Camera:WorldToViewportPoint(Environment.Locked.Character[Environment.Settings.LockPart].Position)
+					local Vector = Camera:WorldToViewportPoint(targetPos)
 					mousemoverel(
 						(Vector.X - UserInputService:GetMouseLocation().X) * Environment.Settings.ThirdPersonSensitivity,
 						(Vector.Y - UserInputService:GetMouseLocation().Y) * Environment.Settings.ThirdPersonSensitivity
@@ -273,12 +309,12 @@ local function Load()
 							Enum.EasingDirection.Out
 						), {
 							CFrame = CFrame.new(Camera.CFrame.Position,
-								Environment.Locked.Character[Environment.Settings.LockPart].Position)
+								targetPos)
 						})
 						Animation:Play()
 					else
 						Camera.CFrame = CFrame.new(Camera.CFrame.Position,
-							Environment.Locked.Character[Environment.Settings.LockPart].Position)
+							targetPos)
 					end
 				end
 
@@ -290,9 +326,11 @@ local function Load()
 	ServiceConnections.InputBeganConnection = UserInputService.InputBegan:Connect(function(Input)
 		if not Typing then
 			pcall(function()
+				-- Input.KeyCode might be Enum.KeyCode.Unknown if using gamepad/mouse; this is fine
 				if Input.KeyCode == Enum.KeyCode[Environment.Settings.TriggerKey] then
 					if Environment.Settings.Toggle then
 						Running = not Running
+						-- in toggle mode, if we switched off, cancel lock; if turned on, keep searching/locking and do not unlock when moving mouse
 						if not Running then CancelLock() end
 					else
 						Running = true
@@ -304,6 +342,7 @@ local function Load()
 
 	ServiceConnections.InputEndedConnection = UserInputService.InputEnded:Connect(function(Input)
 		if not Typing then
+			-- Only do release logic for HOLD mode (toggle mode should persist until toggled off)
 			if not Environment.Settings.Toggle then
 				pcall(function()
 					if Input.KeyCode == Enum.KeyCode[Environment.Settings.TriggerKey] then
