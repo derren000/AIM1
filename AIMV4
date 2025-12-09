@@ -1,0 +1,552 @@
+-- FULL UPDATED AIMBOT w/ NPC support, Prediction AIM, and Hit reticle + UI
+--// Cache
+
+local select = select
+local pcall, getgenv, next, Vector2, mathclamp, type, mousemoverel = select(1, pcall, getgenv, next, Vector2.new, math.clamp, type, mousemoverel or (Input and Input.MouseMove))
+
+--// Preventing Multiple Processes
+
+pcall(function()
+	getgenv().Aimbot.Functions:Exit()
+end)
+
+--// Environment
+
+getgenv().Aimbot = {}
+local Environment = getgenv().Aimbot
+
+--// Services
+
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+
+--// Variables
+
+local RequiredDistance, Typing, Running, Animation, ServiceConnections = 2000, false, false, nil, {}
+
+--// Script Settings
+
+Environment.Settings = {
+	Enabled = true,
+	TeamCheck = false,
+	AliveCheck = true,
+	WallCheck = false,
+	Sensitivity = 0,
+	ThirdPerson = false,
+	ThirdPersonSensitivity = 3,
+	TriggerKey = "LeftControl",
+	Toggle = false,
+	LockPart = "Head",
+
+	-- NEW: prediction settings
+	Prediction = false,            -- false = normal aiming, true = prediction aiming
+	ProjectileSpeed = 600,         -- studs per second (tweak per-weapon)
+	PredictionLeadAmount = 1.0     -- multiplier (you can slightly tweak)
+}
+
+Environment.FOVSettings = {
+	Enabled = true,
+	Visible = true,
+	Amount = 90,
+	Color = Color3.fromRGB(255, 255, 255),
+	LockedColor = Color3.fromRGB(255, 70, 70),
+	Transparency = 0.5,
+	Sides = 60,
+	Thickness = 1,
+	Filled = false
+}
+
+Environment.FOVCircle = Drawing.new("Circle")
+
+--// =================================================================
+--//                        MOVABLE UI WINDOW (3 buttons)
+--// =================================================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AimbotUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999999
+ScreenGui.Enabled = false  -- toggled with P
+ScreenGui.Parent = CoreGui
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 240, 0, 152)
+Frame.Position = UDim2.new(0.5, -120, 0.4, 0)
+Frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Frame.BackgroundTransparency = 0.15
+Frame.BorderSizePixel = 0
+Frame.Active = true
+Frame.Draggable = true
+Frame.Parent = ScreenGui
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 24)
+Title.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+Title.BorderSizePixel = 0
+Title.Text = "Aimbot Settings"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 16
+Title.Parent = Frame
+
+-- KEYBIND BUTTON
+local KeybindBtn = Instance.new("TextButton")
+KeybindBtn.Size = UDim2.new(1, -20, 0, 32)
+KeybindBtn.Position = UDim2.new(0, 10, 0, 35)
+KeybindBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+KeybindBtn.BorderSizePixel = 0
+KeybindBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeybindBtn.TextSize = 16
+KeybindBtn.Text = "Set Keybind: " .. Environment.Settings.TriggerKey
+KeybindBtn.Parent = Frame
+
+-- TOGGLE MODE BUTTON
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(1, -20, 0, 32)
+ToggleBtn.Position = UDim2.new(0, 10, 0, 75)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.TextSize = 16
+ToggleBtn.Text = "Mode: HOLD"
+ToggleBtn.Parent = Frame
+
+-- AIM MODE (Normal / Prediction) BUTTON - NEW
+local AimModeBtn = Instance.new("TextButton")
+AimModeBtn.Size = UDim2.new(1, -20, 0, 32)
+AimModeBtn.Position = UDim2.new(0, 10, 0, 115)
+AimModeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+AimModeBtn.BorderSizePixel = 0
+AimModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+AimModeBtn.TextSize = 16
+AimModeBtn.Text = "Aim Mode: NORMAL"
+AimModeBtn.Parent = Frame
+
+local listeningForKey = false
+
+-- SET KEYBIND
+KeybindBtn.MouseButton1Click:Connect(function()
+	if listeningForKey then return end
+	listeningForKey = true
+	KeybindBtn.Text = "Press a key..."
+	local conn
+	conn = UserInputService.InputBegan:Connect(function(Input)
+		if Input.KeyCode ~= Enum.KeyCode.Unknown then
+			Environment.Settings.TriggerKey = tostring(Input.KeyCode.Name)
+			KeybindBtn.Text = "Set Keybind: " .. Environment.Settings.TriggerKey
+			listeningForKey = false
+			conn:Disconnect()
+		end
+	end)
+end)
+
+-- CHANGE HOLD / TOGGLE MODE
+ToggleBtn.MouseButton1Click:Connect(function()
+	Environment.Settings.Toggle = not Environment.Settings.Toggle
+	ToggleBtn.Text = Environment.Settings.Toggle and "Mode: TOGGLE" or "Mode: HOLD"
+end)
+
+-- AIM MODE TOGGLE: NORMAL <-> PREDICTION
+AimModeBtn.MouseButton1Click:Connect(function()
+	Environment.Settings.Prediction = not Environment.Settings.Prediction
+	AimModeBtn.Text = Environment.Settings.Prediction and "Aim Mode: PREDICT" or "Aim Mode: NORMAL"
+end)
+
+-- OPEN/CLOSE UI WITH P
+UserInputService.InputBegan:Connect(function(Input, GPE)
+	if GPE then return end
+	if Input.KeyCode == Enum.KeyCode.P then
+		ScreenGui.Enabled = not ScreenGui.Enabled
+	end
+end)
+
+--// =================================================================
+--//                            AIMBOT LOGIC
+--// =================================================================
+
+-- Attempt to get global ignore list from the game's UniversalTables if available (BulletVisualizer used this)
+local ignoreTable = nil
+pcall(function()
+	local ut = game.ReplicatedStorage:FindFirstChild("Modules")
+	if ut and ut:FindFirstChild("UniversalTables") then
+		local success, tbl = pcall(function()
+			return require(game.ReplicatedStorage.Modules.UniversalTables).ReturnTable("GlobalIgnoreListProjectile")
+		end)
+		if success and type(tbl) == "table" then
+			ignoreTable = tbl
+		end
+	end
+end)
+
+local function makeRaycastParams(extra)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	local filter = {}
+	if ignoreTable then
+		-- merge ignoreTable into filter
+		for i=1,#ignoreTable do filter[#filter+1] = ignoreTable[i] end
+	end
+	if LocalPlayer and LocalPlayer.Character then
+		filter[#filter+1] = LocalPlayer.Character
+	end
+	if extra then filter[#filter+1] = extra end
+	rp.FilterDescendantsInstances = filter
+	rp.IgnoreWater = true
+	rp.CollisionGroup = "WeaponRay"
+	return rp
+end
+
+local function CancelLock()
+	Environment.Locked = nil
+	if Animation then
+		Animation:Cancel()
+		Animation = nil
+	end
+	Environment.FOVCircle.Color = Environment.FOVSettings.Color
+end
+
+-- Helper to compute predicted position (linear)
+local function computePredictedPosition(part)
+	if not part then return nil end
+	local pos = part.Position
+	local vel = Vector3.new(0,0,0)
+	-- try to get assembly velocity if available
+	local success, v = pcall(function() return part.AssemblyLinearVelocity end)
+	if success and v then vel = v end
+
+	-- distance/time estimate
+	local camPos = Camera.CFrame.Position
+	local dist = (pos - camPos).Magnitude
+	local speed = Environment.Settings.ProjectileSpeed
+	if speed <= 0 then speed = 1 end
+	local time = dist / speed
+
+	-- apply lead multiplier
+	local predicted = pos + vel * time * Environment.Settings.PredictionLeadAmount
+	return predicted, time
+end
+
+local function GetClosestPlayer()
+	-- cache mouse position once per call (faster)
+	local mousePos = Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+
+	if not Environment.Locked then
+		RequiredDistance = (Environment.FOVSettings.Enabled and Environment.FOVSettings.Amount or 2000)
+
+		-- =====================================================
+		-- 1. CHECK PLAYERS FIRST (fast path)
+		-- =====================================================
+		for _, v in next, Players:GetPlayers() do
+			if v ~= LocalPlayer then
+				local char = v.Character
+				if char and char:FindFirstChild(Environment.Settings.LockPart) and char:FindFirstChildOfClass("Humanoid") then
+					if Environment.Settings.TeamCheck and v.Team == LocalPlayer.Team then continue end
+					if Environment.Settings.AliveCheck and char:FindFirstChildOfClass("Humanoid").Health <= 0 then continue end
+					if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({char[Environment.Settings.LockPart].Position}, char:GetDescendants())) > 0 then continue end
+
+					local ok, vec = pcall(function()
+						return Camera:WorldToViewportPoint(char[Environment.Settings.LockPart].Position)
+					end)
+					if not ok then continue end
+					local OnScreen = vec.Z > 0
+					local Distance = (mousePos - Vector2(vec.X, vec.Y)).Magnitude
+
+					if Distance < RequiredDistance and OnScreen then
+						RequiredDistance = Distance
+						Environment.Locked = v
+					end
+				end
+			end
+		end
+
+		-- =====================================================
+		-- 2. CHECK NPCs ONLY IF NO PLAYER FOUND OR closer possible
+		--    (iterate workspace descendants once)
+		-- =====================================================
+		-- Only proceed if there's still room to find something closer than current RequiredDistance
+		if RequiredDistance > 0 then
+			local desc = workspace:GetDescendants()
+			for i = 1, #desc do
+				local obj = desc[i]
+				if obj and obj:IsA("Humanoid") then
+					local model = obj.Parent
+					-- Skip player's own character or players' characters (we already checked players)
+					if model ~= LocalPlayer.Character and not Players:GetPlayerFromCharacter(model) then
+						local part = model:FindFirstChild(Environment.Settings.LockPart)
+						if part then
+							if Environment.Settings.AliveCheck and obj.Health <= 0 then continue end
+							if Environment.Settings.WallCheck and #(Camera:GetPartsObscuringTarget({part.Position}, model:GetDescendants())) > 0 then continue end
+
+							local ok, vec = pcall(function()
+								return Camera:WorldToViewportPoint(part.Position)
+							end)
+							if not ok then continue end
+							local OnScreen = vec.Z > 0
+							local Distance = (mousePos - Vector2(vec.X, vec.Y)).Magnitude
+
+							if Distance < RequiredDistance and OnScreen then
+								RequiredDistance = Distance
+								-- create a light wrapper so rest of code can treat it similar to player
+								Environment.Locked = { Character = model, _isNPC = true }
+							end
+						end
+					end
+				end
+			end
+		end
+
+	else
+		-- When already locked:
+		-- If we are in toggle mode and Running -> keep lock regardless of mouse movement (user requested)
+		-- If we are NOT in toggle mode -> keep previous behavior: unlock when target leaves FOV radius
+		local lockChar = Environment.Locked and Environment.Locked.Character
+		if lockChar and lockChar:FindFirstChild(Environment.Settings.LockPart) then
+			-- compute current distance from mouse to target
+			local ok, vec = pcall(function()
+				return Camera:WorldToViewportPoint(lockChar[Environment.Settings.LockPart].Position)
+			end)
+			if not ok then
+				CancelLock()
+				return
+			end
+			local OnScreen = vec.Z > 0
+			local Distance = (Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y) - Vector2(vec.X, vec.Y)).Magnitude
+
+			-- only cancel when: not toggle mode AND Distance > RequiredDistance OR the target is offscreen
+			if (not Environment.Settings.Toggle and Distance > RequiredDistance) or (not OnScreen) then
+				CancelLock()
+			else
+				-- keep lock (important: don't recalc RequiredDistance here; keep it as previous value so we don't flip)
+			end
+		else
+			CancelLock()
+		end
+	end
+end
+
+-- TYPING DISABLES AIMBIND
+ServiceConnections.TypingStartedConnection = UserInputService.TextBoxFocused:Connect(function()
+	Typing = true
+end)
+
+ServiceConnections.TypingEndedConnection = UserInputService.TextBoxFocusReleased:Connect(function()
+	Typing = false
+end)
+
+-- NEW: Hit reticle drawing (plus)
+do
+	-- two lines to form a plus sign centered at mouse
+	local plusSize = 8
+	Environment.HitReticle = {
+		H = Drawing.new("Line"),
+		V = Drawing.new("Line")
+	}
+	for _, l in pairs(Environment.HitReticle) do
+		l.Thickness = 2
+		l.Transparency = 1
+		l.Visible = false
+		l.Color = Color3.fromRGB(255, 0, 0)
+	end
+
+	-- helper to update + at mousePos with given color
+	function Environment.UpdateHitReticle(mousePos, color, visible)
+		local h = Environment.HitReticle.H
+		local v = Environment.HitReticle.V
+		h.From = Vector2(mousePos.X - plusSize, mousePos.Y)
+		h.To   = Vector2(mousePos.X + plusSize, mousePos.Y)
+		v.From = Vector2(mousePos.X, mousePos.Y - plusSize)
+		v.To   = Vector2(mousePos.X, mousePos.Y + plusSize)
+		h.Color = color
+		v.Color = color
+		h.Visible = visible
+		v.Visible = visible
+	end
+end
+
+-- helper to raycast from camera toward worldPos and return whether hit target model
+local function willHitTarget(predictedWorldPos, targetModel)
+	if not predictedWorldPos or not targetModel then return false end
+	local origin = Camera.CFrame.Position
+	local direction = (predictedWorldPos - origin).Unit * ((predictedWorldPos - origin).Magnitude + 1)
+	local rp = makeRaycastParams(targetModel)
+	local ok, result = pcall(function() return workspace:Raycast(origin, direction, rp) end)
+	if not ok then return false end
+	if result and result.Instance then
+		-- if the hit instance is a descendant of targetModel -> likely hit
+		if result.Instance:IsDescendantOf(targetModel) then
+			return true
+		else
+			return false
+		end
+	end
+	-- nothing hit -> likely hit (no obstacles)
+	return true
+end
+
+-- MAIN LOOP
+local function Load()
+	ServiceConnections.RenderSteppedConnection = RunService.RenderStepped:Connect(function()
+		-- update FOV circle
+		if Environment.FOVSettings.Enabled and Environment.Settings.Enabled then
+			Environment.FOVCircle.Radius = Environment.FOVSettings.Amount
+			Environment.FOVCircle.Thickness = Environment.FOVSettings.Thickness
+			Environment.FOVCircle.Filled = Environment.FOVSettings.Filled
+			Environment.FOVCircle.NumSides = Environment.FOVSettings.Sides
+			Environment.FOVCircle.Color = Environment.FOVSettings.Color
+			Environment.FOVCircle.Transparency = Environment.FOVSettings.Transparency
+			Environment.FOVCircle.Visible = Environment.FOVSettings.Visible
+			Environment.FOVCircle.Position = Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+		else
+			Environment.FOVCircle.Visible = false
+		end
+
+		-- update hit reticle visibility & aiming
+		local mousePos = Vector2(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+		if Environment.Settings.Enabled and Environment.FOVSettings.Enabled and Environment.FOVSettings.Visible then
+			-- default invisible until we compute
+			Environment.UpdateHitReticle(mousePos, Color3.fromRGB(255, 0, 0), false)
+		else
+			Environment.UpdateHitReticle(mousePos, Color3.fromRGB(255, 0, 0), false)
+		end
+
+		if Running and Environment.Settings.Enabled then
+			GetClosestPlayer()
+
+			if Environment.Locked then
+				-- ensure the locked Character still exists and has lock part before attempting to aim
+				local ok, targetPos = pcall(function()
+					return Environment.Locked.Character[Environment.Settings.LockPart].Position
+				end)
+				if not ok then
+					CancelLock()
+					return
+				end
+
+				-- choose aim point: normal or predicted
+				local aimWorldPos = targetPos
+				if Environment.Settings.Prediction then
+					local predicted, time = computePredictedPosition(Environment.Locked.Character and Environment.Locked.Character:FindFirstChild(Environment.Settings.LockPart))
+					if predicted then aimWorldPos = predicted end
+				end
+
+				-- update hit reticle: green if raycast path to aimWorldPos hits the target (or nothing), red otherwise
+				local willHit = willHitTarget(aimWorldPos, Environment.Locked.Character)
+				Environment.UpdateHitReticle(mousePos, willHit and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,100,100), true)
+
+				-- now perform aiming movement to aimWorldPos
+				if Environment.Settings.ThirdPerson then
+					Environment.Settings.ThirdPersonSensitivity = mathclamp(Environment.Settings.ThirdPersonSensitivity, 0.1, 5)
+					local vec = Camera:WorldToViewportPoint(aimWorldPos)
+					mousemoverel(
+						(vec.X - UserInputService:GetMouseLocation().X) * Environment.Settings.ThirdPersonSensitivity,
+						(vec.Y - UserInputService:GetMouseLocation().Y) * Environment.Settings.ThirdPersonSensitivity
+					)
+				else
+					if Environment.Settings.Sensitivity > 0 then
+						Animation = TweenService:Create(Camera, TweenInfo.new(
+							Environment.Settings.Sensitivity,
+							Enum.EasingStyle.Sine,
+							Enum.EasingDirection.Out
+						), {
+							CFrame = CFrame.new(Camera.CFrame.Position, aimWorldPos)
+						})
+						Animation:Play()
+					else
+						Camera.CFrame = CFrame.new(Camera.CFrame.Position, aimWorldPos)
+					end
+				end
+
+				Environment.FOVCircle.Color = Environment.FOVSettings.LockedColor
+			else
+				-- not locked -> hide reticle
+				Environment.UpdateHitReticle(mousePos, Color3.fromRGB(255, 0, 0), false)
+			end
+		else
+			-- not running -> hide reticle
+			Environment.UpdateHitReticle(mousePos, Color3.fromRGB(255, 0, 0), false)
+		end
+	end)
+
+	-- input began
+	ServiceConnections.InputBeganConnection = UserInputService.InputBegan:Connect(function(Input)
+		if not Typing then
+			pcall(function()
+				-- Input.KeyCode might be Enum.KeyCode.Unknown if using gamepad/mouse; this is fine
+				if Input.KeyCode == Enum.KeyCode[Environment.Settings.TriggerKey] then
+					if Environment.Settings.Toggle then
+						Running = not Running
+						-- in toggle mode, if we switched off, cancel lock; if turned on, keep searching/locking and do not unlock when moving mouse
+						if not Running then CancelLock() end
+					else
+						Running = true
+					end
+				end
+			end)
+		end
+	end)
+
+	-- input ended
+	ServiceConnections.InputEndedConnection = UserInputService.InputEnded:Connect(function(Input)
+		if not Typing then
+			-- Only do release logic for HOLD mode (toggle mode should persist until toggled off)
+			if not Environment.Settings.Toggle then
+				pcall(function()
+					if Input.KeyCode == Enum.KeyCode[Environment.Settings.TriggerKey] then
+						Running = false
+						CancelLock()
+					end
+				end)
+			end
+		end
+	end)
+end
+
+-- FUNCTIONS
+Environment.Functions = {}
+
+function Environment.Functions:Exit()
+	for _, v in next, ServiceConnections do
+		v:Disconnect()
+	end
+
+	-- clean drawings
+	if Environment.FOVCircle and Environment.FOVCircle.Remove then
+		Environment.FOVCircle:Remove()
+	end
+	if Environment.HitReticle then
+		for _, l in pairs(Environment.HitReticle) do
+			if l and l.Remove then pcall(l.Remove, l) end
+		end
+	end
+
+	getgenv().Aimbot.Functions = nil
+	getgenv().Aimbot = nil
+
+	Load = nil
+	GetClosestPlayer = nil
+	CancelLock = nil
+end
+
+function Environment.Functions:Restart()
+	for _, v in next, ServiceConnections do
+		v:Disconnect()
+	end
+
+	Load()
+end
+
+function Environment.Functions:ResetSettings()
+	Environment.Settings.TriggerKey = "LeftControl"
+	Environment.Settings.Toggle = false
+	Environment.Settings.Prediction = false
+	Environment.Settings.ProjectileSpeed = 600
+	Environment.Settings.PredictionLeadAmount = 1.0
+end
+
+-- LOAD AIMBOT
+Load()
